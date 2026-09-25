@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.section import SectionService
+from app.services.section import FILTER_FIELDS, STATUSES_HINT, SectionService
 
 router = APIRouter(prefix="/api/section", tags=["线路区段"])
 
@@ -16,17 +16,58 @@ LIST_FIELDS = ["区段编码", "区段名称", "所属线路", "起止里程", "
 STATUSES = ["在建", "已投用", "限速运行", "已封闭"]
 
 
+def _build_filters(code: str | None, name: str | None, line: str | None) -> dict[str, str]:
+    """把查询参数收成与页面列名一致的筛选条件；空白值不带入。"""
+    raw = {"区段编码": code, "区段名称": name, "所属线路": line}
+    return {field: str(value or "").strip() for field, value in raw.items() if field in FILTER_FIELDS}
+
+
+def _check_status(status: str | None) -> None:
+    if status and status not in STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"区段状态「{status}」不在允许范围：{STATUSES_HINT}",
+        )
+
+
+# 注意：/export 必须排在 /{entry_id} 之前，否则「export」会被当成 entry_id 解析而报错
+@router.get("/export")
+def export_entries(
+    区段编码: str | None = Query(default=None, description="按区段编码包含匹配"),
+    区段名称: str | None = Query(default=None, description="按区段名称包含匹配"),
+    所属线路: str | None = Query(default=None, description="按所属线路包含匹配"),
+    keyword: str | None = Query(default=None, description="兼容旧参数：等同区段编码"),
+    status: str | None = Query(default=None, description="在建、已投用、限速运行、已封闭"),
+) -> dict[str, Any]:
+    """导出线路区段清单：与列表接口走同一套筛选条件，取命中行的全量、同列序数据。"""
+    _check_status(status)
+    filters = _build_filters(区段编码 or keyword, 区段名称, 所属线路)
+    items, total, active = service.export_entries(filters=filters, status=status)
+    return {
+        "module": "section",
+        "columns": LIST_FIELDS,
+        "filters": active,
+        "total": total,
+        "items": items,
+    }
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
-    keyword: str | None = Query(default=None, description="按区段编码检索"),
+    区段编码: str | None = Query(default=None, description="按区段编码包含匹配"),
+    区段名称: str | None = Query(default=None, description="按区段名称包含匹配"),
+    所属线路: str | None = Query(default=None, description="按所属线路包含匹配"),
+    keyword: str | None = Query(default=None, description="兼容旧参数：等同区段编码"),
     status: str | None = Query(default=None, description="在建、已投用、限速运行、已封闭"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按区段编码与状态过滤线路区段列表；没有数据时返回空页，不报错。"""
+    """按区段编码、区段名称、所属线路与状态过滤线路区段列表；无条件时返回全量。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    _check_status(status)
+    filters = _build_filters(区段编码 or keyword, 区段名称, 所属线路)
+    items, total, _active = service.list_entries(filters=filters, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
 
 
@@ -56,10 +97,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出线路区段清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "section", "total": total, "items": items}
