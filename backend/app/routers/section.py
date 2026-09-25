@@ -3,31 +3,67 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Request
 
 from app.schemas import ActionResult, EntryPayload, PageResult
+from app.services.section import FILTER_FIELDS, LIST_FIELDS, STATUS_ORDER
 from app.services.section import SectionService
 
 router = APIRouter(prefix="/api/section", tags=["线路区段"])
 
 service = SectionService()
 
-LIST_FIELDS = ["区段编码", "区段名称", "所属线路", "起止里程", "管辖工区", "投运日期", "限速值", "区段状态"]
-STATUSES = ["在建", "已投用", "限速运行", "已封闭"]
+# 查询与导出共用的筛选参数；状态不在此列，单独校验取值。
+SUPPORTED_PARAMS = set(FILTER_FIELDS) | {"status", "page", "size"}
+
+
+def _read_filters(request: Request) -> dict[str, Any]:
+    """列表与导出共用的条件解析：未知参数、空白取值、非法状态都要说明原因。"""
+    unknown = sorted(set(request.query_params) - SUPPORTED_PARAMS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"不支持的筛选条件：{'、'.join(unknown)}；"
+                f"可用条件为 keyword（区段编码）、name（区段名称）、line（所属线路）、status（区段状态）"
+            ),
+        )
+    status = (request.query_params.get("status") or "").strip() or None
+    if status and status not in STATUS_ORDER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"区段状态「{status}」无效，可选值：{'、'.join(STATUS_ORDER)}",
+        )
+    return {
+        "keyword": (request.query_params.get("keyword") or "").strip() or None,
+        "name": (request.query_params.get("name") or "").strip() or None,
+        "line": (request.query_params.get("line") or "").strip() or None,
+        "status": status,
+    }
 
 
 @router.get("", response_model=PageResult[dict])
-def list_entries(
-    keyword: str | None = Query(default=None, description="按区段编码检索"),
-    status: str | None = Query(default=None, description="在建、已投用、限速运行、已封闭"),
-    page: int = 1,
-    size: int = 20,
-) -> PageResult[dict]:
-    """按区段编码与状态过滤线路区段列表；没有数据时返回空页，不报错。"""
+def list_entries(request: Request, page: int = 1, size: int = 20) -> PageResult[dict]:
+    """按区段编码、区段名称、所属线路、区段状态过滤线路区段列表；没有命中时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    filters = _read_filters(request)
+    items, total = service.list_entries(**filters, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries(request: Request) -> dict[str, Any]:
+    """导出线路区段清单：与列表共用同一套筛选条件与取数口径，只去掉分页。"""
+    filters = _read_filters(request)
+    items, total = service.export_entries(**filters)
+    return {
+        "module": "section",
+        "columns": LIST_FIELDS,
+        "filters": filters,
+        "total": total,
+        "items": items,
+    }
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +92,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出线路区段清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "section", "total": total, "items": items}

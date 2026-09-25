@@ -11,24 +11,66 @@ STATUS_ORDER = ["在建", "已投用", "限速运行", "已封闭"]
 ACTION_RULES = {"办理投用": "已投用", "申请限速": "限速运行", "封闭区段": "已封闭"}
 NEGATIVE_ACTIONS = []
 
+# 列表/导出统一的列顺序，保证页面、导出文件与服务端取数结果逐行对齐。
+LIST_FIELDS = ["区段编码", "区段名称", "所属线路", "起止里程", "管辖工区", "投运日期", "限速值", "区段状态"]
+
+# 筛选入口（query 参数名 -> 数据字段名）：列表与导出共用，保证一套条件。
+FILTER_FIELDS = {"keyword": "区段编码", "name": "区段名称", "line": "所属线路"}
+
 
 class SectionService:
+    def filter_rows(
+        self,
+        *,
+        keyword: str | None = None,
+        name: str | None = None,
+        line: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """列表与导出共用的筛选口径：命中条件的区段才返回，顺序与存储顺序一致。"""
+        rows = store.rows(MODULE)
+        for param, field in FILTER_FIELDS.items():
+            value = {"keyword": keyword, "name": name, "line": line}[param]
+            if value:
+                rows = [row for row in rows if value in str(row.get(field, ""))]
+        if status:
+            rows = [row for row in rows if row.get("status") == status]
+        return rows
+
+    def to_view(self, row: dict[str, Any]) -> dict[str, Any]:
+        """按统一列序投影一条记录；id 保留给行定位与动作接口，区段状态取流程状态字段。"""
+        view = {"id": row.get("id")}
+        view.update({field: row.get(field) for field in LIST_FIELDS})
+        view["区段状态"] = row.get("status")
+        return view
+
     def list_entries(
         self,
         *,
         keyword: str | None = None,
+        name: str | None = None,
+        line: str | None = None,
         status: str | None = None,
         page: int = 1,
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
-        rows = store.rows(MODULE)
-        if keyword:
-            rows = [row for row in rows if keyword in str(row.get("区段编码", ""))]
-        if status:
-            rows = [row for row in rows if row.get("status") == status]
+        rows = self.filter_rows(keyword=keyword, name=name, line=line, status=status)
         total = len(rows)
         start = max(page - 1, 0) * size
-        return rows[start:start + size], total
+        page_rows = [self.to_view(row) for row in rows[start:start + size]]
+        return page_rows, total
+
+    def export_entries(
+        self,
+        *,
+        keyword: str | None = None,
+        name: str | None = None,
+        line: str | None = None,
+        status: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """导出走与列表完全相同的筛选与投影，只是不分页，保证内容与行序一致。"""
+        rows = self.filter_rows(keyword=keyword, name=name, line=line, status=status)
+        return [self.to_view(row) for row in rows], len(rows)
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
         return store.find(MODULE, entry_id)
